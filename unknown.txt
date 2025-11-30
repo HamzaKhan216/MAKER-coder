@@ -1,0 +1,952 @@
+import React, { useState, useEffect, useMemo, useCallback, FormEvent } from 'react';
+
+// --- Types --- //
+interface Product {
+  id: string;
+  name: string;
+  description: string;
+  price: number; // Selling price per unit
+  costPrice: number; // Cost price per unit (for profit calculation)
+  stock: number; // Current stock quantity
+  category: string;
+  supplier: string;
+}
+
+interface Customer {
+  id: string;
+  name: string;
+  phone: string;
+  address: string;
+  creditBalance: number; // Amount customer owes (negative means overpaid/store owes customer, usually 0 or positive)
+}
+
+interface SaleItem {
+  productId: string;
+  productName: string;
+  quantity: number;
+  priceAtSale: number; // Price per unit at the time of sale
+  costAtSale: number; // Cost per unit at the time of sale
+}
+
+interface Sale {
+  id: string;
+  timestamp: number; // Date.now()
+  items: SaleItem[];
+  subtotal: number;
+  discountAmount: number; // Absolute discount applied
+  finalAmount: number;
+  paymentMethod: 'cash' | 'card' | 'credit';
+  customerId?: string; // ID of customer if paymentMethod is 'credit'
+  notes?: string;
+}
+
+interface Transaction {
+  id: string;
+  timestamp: number;
+  customerId: string; // The customer involved
+  type: 'credit_sale' | 'payment_received' | 'credit_adjustment'; // What kind of transaction
+  amount: number; // Positive for increase in customer's debt, negative for decrease
+  notes: string;
+  relatedSaleId?: string; // Link to sale if applicable
+}
+
+type View = 'dashboard' | 'inventory' | 'sales' | 'customers' | 'transactions';
+
+// --- Utility Functions --- //
+const generateId = (): string => Math.random().toString(36).substr(2, 9);
+
+// --- useLocalStorage Hook --- //
+// A custom hook to persist state in localStorage
+function useLocalStorage<T>(key: string, initialValue: T): [T, React.Dispatch<React.SetStateAction<T>>] {
+  const [storedValue, setStoredValue] = useState<T>(() => {
+    try {
+      const item = window.localStorage.getItem(key);
+      return item ? JSON.parse(item) : initialValue;
+    } catch (error) {
+      console.error('Error reading localStorage key "' + key + '":', error);
+      return initialValue;
+    }
+  });
+
+  const setValue = useCallback((value: T | ((val: T) => T)) => {
+    try {
+      const valueToStore = value instanceof Function ? value(storedValue) : value;
+      setStoredValue(valueToStore);
+      window.localStorage.setItem(key, JSON.stringify(valueToStore));
+    } catch (error) {
+      console.error('Error writing to localStorage key "' + key + '":', error);
+    }
+  }, [key, storedValue]); // `storedValue` in dependency array ensures the latest state is used in function updates
+
+  return [storedValue, setValue];
+}
+
+// --- Main App Component --- //
+const App: React.FC = () => {
+  // --- Global State using localStorage --- //
+  const [products, setProducts] = useLocalStorage<Product[]>('stockdesk-products', []);
+  const [customers, setCustomers] = useLocalStorage<Customer[]>('stockdesk-customers', []);
+  const [sales, setSales] = useLocalStorage<Sale[]>('stockdesk-sales', []);
+  const [transactions, setTransactions] = useLocalStorage<Transaction[]>('stockdesk-transactions', []);
+
+  // --- UI State --- //
+  const [currentView, setCurrentView] = useState<View>('dashboard');
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
+
+  // --- CRUD Handlers for Products --- //
+  const addProduct = useCallback((product: Omit<Product, 'id'>) => {
+    const newProduct: Product = { ...product, id: generateId() };
+    setProducts((prev) => [...prev, newProduct]);
+    alert('Product added successfully!');
+    return newProduct;
+  }, [setProducts]);
+
+  const updateProduct = useCallback((updatedProduct: Product) => {
+    setProducts((prev) =>
+      prev.map((p) => (p.id === updatedProduct.id ? updatedProduct : p))
+    );
+    alert('Product updated successfully!');
+  }, [setProducts]);
+
+  const deleteProduct = useCallback((id: string) => {
+    if (window.confirm('Are you sure you want to delete this product? This action cannot be undone.')) {
+      setProducts((prev) => prev.filter((p) => p.id !== id));
+      alert('Product deleted successfully!');
+    }
+  }, [setProducts]);
+
+  // --- CRUD Handlers for Customers --- //
+  const addCustomer = useCallback((customer: Omit<Customer, 'id' | 'creditBalance'>) => {
+    const newCustomer: Customer = { ...customer, id: generateId(), creditBalance: 0 };
+    setCustomers((prev) => [...prev, newCustomer]);
+    alert('Customer added successfully!');
+    return newCustomer;
+  }, [setCustomers]);
+
+  const updateCustomer = useCallback((updatedCustomer: Customer) => {
+    setCustomers((prev) =>
+      prev.map((c) => (c.id === updatedCustomer.id ? updatedCustomer : c))
+    );
+    alert('Customer updated successfully!');
+  }, [setCustomers]);
+
+  const deleteCustomer = useCallback((id: string) => {
+    if (window.confirm('Are you sure you want to delete this customer? All related credit history will be lost.')) {
+      setCustomers((prev) => prev.filter((c) => c.id !== id));
+      setTransactions((prev) => prev.filter((t) => t.customerId !== id)); // Remove related transactions
+      // For simplicity, sales linked to this customer will just have their customerId removed.
+      setSales((prev) => prev.map(s => s.customerId === id ? { ...s, customerId: undefined, paymentMethod: s.paymentMethod === 'credit' ? 'cash' : s.paymentMethod } : s)); 
+      alert('Customer deleted successfully!');
+    }
+  }, [setCustomers, setTransactions, setSales]);
+
+  // --- Sale Handler --- //
+  const recordSale = useCallback((
+    items: SaleItem[],
+    discountAmount: number,
+    paymentMethod: 'cash' | 'card' | 'credit',
+    customerId?: string,
+    notes?: string
+  ) => {
+    if (items.length === 0) {
+      alert('Cannot record an empty sale. Please add products.');
+      return null;
+    }
+
+    const saleId = generateId();
+    const timestamp = Date.now();
+
+    // Calculate subtotal and final amount
+    const subtotal = items.reduce((sum, item) => sum + item.quantity * item.priceAtSale, 0);
+    const finalAmount = Math.max(0, subtotal - discountAmount);
+
+    // Create sale object
+    const newSale: Sale = {
+      id: saleId,
+      timestamp,
+      items,
+      subtotal,
+      discountAmount,
+      finalAmount,
+      paymentMethod,
+      customerId,
+      notes,
+    };
+
+    // Update sales history
+    setSales((prev) => [...prev, newSale]);
+
+    // Update product stock
+    setProducts((prevProducts) =>
+      prevProducts.map((p) => {
+        const soldItem = items.find((item) => item.productId === p.id);
+        return soldItem ? { ...p, stock: p.stock - soldItem.quantity } : p;
+      })
+    );
+
+    // Handle credit sales and transactions
+    if (paymentMethod === 'credit' && customerId) {
+      setCustomers((prevCustomers) =>
+        prevCustomers.map((c) =>
+          c.id === customerId
+            ? { ...c, creditBalance: c.creditBalance + finalAmount }
+            : c
+        )
+      );
+      setTransactions((prev) => [
+        ...prev,
+        {
+          id: generateId(),
+          timestamp,
+          customerId,
+          type: 'credit_sale',
+          amount: finalAmount,
+          notes: `Credit sale (Sale ID: ${saleId})`,
+          relatedSaleId: saleId,
+        },
+      ]);
+    }
+
+    alert('Sale recorded successfully!');
+    return newSale;
+  }, [setSales, setProducts, setCustomers, setTransactions]);
+
+  // --- Customer Credit Payment Handler --- //
+  const recordCustomerPayment = useCallback((customerId: string, amount: number, notes: string) => {
+    if (!customerId || amount <= 0) {
+        alert('Invalid customer or amount for payment.');
+        return;
+    }
+
+    const timestamp = Date.now();
+    const transactionId = generateId();
+
+    setCustomers((prevCustomers) =>
+      prevCustomers.map((c) =>
+        c.id === customerId
+          ? { ...c, creditBalance: c.creditBalance - amount } // Reduce credit balance
+          : c
+      )
+    );
+
+    setTransactions((prev) => [
+      ...prev,
+      {
+        id: transactionId,
+        timestamp,
+        customerId,
+        type: 'payment_received',
+        amount: -amount, // Negative amount signifies reduction in debt
+        notes: `Payment received: ${notes}`,
+      },
+    ]);
+    alert(`Payment of Rs. ${amount.toFixed(2)} recorded for customer!`);
+  }, [setCustomers, setTransactions]);
+
+  // --- Derived State for Dashboard/Analytics --- //
+  const dashboardData = useMemo(() => {
+    const totalProducts = products.length;
+    const totalCustomers = customers.length;
+    const totalSalesValue = sales.reduce((sum, sale) => sum + sale.finalAmount, 0);
+    const totalCreditOutstanding = customers.reduce((sum, cust) => sum + cust.creditBalance, 0);
+    const lowStockItems = products.filter(p => p.stock <= 5); // Threshold for low stock
+    const topSellingProducts = sales.flatMap(s => s.items)
+                                    .reduce((acc, item) => {
+                                      acc[item.productId] = (acc[item.productId] || 0) + item.quantity;
+                                      return acc;
+                                    }, {} as Record<string, number>);
+    const topProductsList = Object.entries(topSellingProducts)
+                                  .sort(([, a], [, b]) => b - a)
+                                  .slice(0, 5) // Top 5 products
+                                  .map(([id, quantity]) => {
+                                    const product = products.find(p => p.id === id);
+                                    return { name: product?.name || `Unknown Product (${id})`, quantity };
+                                  });
+
+    return {
+      totalProducts,
+      totalCustomers,
+      totalSalesValue,
+      totalCreditOutstanding,
+      lowStockItems,
+      topProductsList,
+    };
+  }, [products, customers, sales]);
+
+  // --- Inline Components for Views (to keep all logic in one file) --- //
+
+  // Product Form Component
+  const ProductForm: React.FC<{ product?: Product | null; onSubmit: (product: Omit<Product, 'id'> | Product) => void; onCancel: () => void; }> = 
+    ({ product, onSubmit, onCancel }) => {
+    const [name, setName] = useState(product?.name || '');
+    const [description, setDescription] = useState(product?.description || '');
+    const [price, setPrice] = useState(product?.price.toString() || '');
+    const [costPrice, setCostPrice] = useState(product?.costPrice.toString() || '');
+    const [stock, setStock] = useState(product?.stock.toString() || '');
+    const [category, setCategory] = useState(product?.category || '');
+    const [supplier, setSupplier] = useState(product?.supplier || '');
+
+    const handleSubmit = (e: FormEvent) => {
+      e.preventDefault();
+      if (!name || !price || !stock) {
+        alert('Name, Price, and Stock are required.');
+        return;
+      }
+      const newProduct = {
+        id: product?.id || '',
+        name,
+        description,
+        price: parseFloat(price),
+        costPrice: parseFloat(costPrice || '0'),
+        stock: parseInt(stock, 10),
+        category,
+        supplier,
+      };
+      onSubmit(newProduct);
+      onCancel(); // Close form after submission
+    };
+
+    return (
+      <div style={{ padding: '20px', border: '1px solid #ccc', borderRadius: '8px', marginBottom: '20px', backgroundColor: '#fff' }}>
+        <h3>{product ? 'Edit Product' : 'Add New Product'}</h3>
+        <form onSubmit={handleSubmit} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+          <label>Name: <input type="text" value={name} onChange={(e) => setName(e.target.value)} required style={inputStyle} /></label>
+          <label>Category: <input type="text" value={category} onChange={(e) => setCategory(e.target.value)} style={inputStyle} /></label>
+          <label>Price (Rs.): <input type="number" value={price} onChange={(e) => setPrice(e.target.value)} required min="0" step="0.01" style={inputStyle} /></label>
+          <label>Cost Price (Rs.): <input type="number" value={costPrice} onChange={(e) => setCostPrice(e.target.value)} min="0" step="0.01" style={inputStyle} /></label>
+          <label>Stock: <input type="number" value={stock} onChange={(e) => setStock(e.target.value)} required min="0" step="1" style={inputStyle} /></label>
+          <label>Supplier: <input type="text" value={supplier} onChange={(e) => setSupplier(e.target.value)} style={inputStyle} /></label>
+          <label style={{ gridColumn: '1 / -1' }}>Description: <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} style={{ ...inputStyle, width: '100%' }} /></label>
+          <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+            <button type="submit" style={buttonStyle}>{product ? 'Update Product' : 'Add Product'}</button>
+            <button type="button" onClick={onCancel} style={{ ...buttonStyle, backgroundColor: '#6c757d' }}>Cancel</button>
+          </div>
+        </form>
+      </div>
+    );
+  };
+
+  // Customer Form Component
+  const CustomerForm: React.FC<{ customer?: Customer | null; onSubmit: (customer: Omit<Customer, 'id' | 'creditBalance'> | Customer) => void; onCancel: () => void; }> = 
+    ({ customer, onSubmit, onCancel }) => {
+    const [name, setName] = useState(customer?.name || '');
+    const [phone, setPhone] = useState(customer?.phone || '');
+    const [address, setAddress] = useState(customer?.address || '');
+
+    const handleSubmit = (e: FormEvent) => {
+      e.preventDefault();
+      if (!name || !phone) {
+        alert('Name and Phone are required.');
+        return;
+      }
+      const newCustomer = {
+        id: customer?.id || '',
+        name,
+        phone,
+        address,
+        creditBalance: customer?.creditBalance || 0, // Preserve creditBalance for update
+      };
+      onSubmit(newCustomer);
+      onCancel();
+    };
+
+    return (
+      <div style={{ padding: '20px', border: '1px solid #ccc', borderRadius: '8px', marginBottom: '20px', backgroundColor: '#fff' }}>
+        <h3>{customer ? 'Edit Customer' : 'Add New Customer'}</h3>
+        <form onSubmit={handleSubmit} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+          <label>Name: <input type="text" value={name} onChange={(e) => setName(e.target.value)} required style={inputStyle} /></label>
+          <label>Phone: <input type="text" value={phone} onChange={(e) => setPhone(e.target.value)} required style={inputStyle} /></label>
+          <label style={{ gridColumn: '1 / -1' }}>Address: <textarea value={address} onChange={(e) => setAddress(e.target.value)} rows={2} style={{ ...inputStyle, width: '100%' }} /></label>
+          <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+            <button type="submit" style={buttonStyle}>{customer ? 'Update Customer' : 'Add Customer'}</button>
+            <button type="button" onClick={onCancel} style={{ ...buttonStyle, backgroundColor: '#6c757d' }}>Cancel</button>
+          </div>
+        </form>
+      </div>
+    );
+  };
+
+  // Sale Form Component
+  const SaleForm: React.FC<{ products: Product[]; customers: Customer[]; onRecordSale: typeof recordSale; }> = 
+    ({ products, customers, onRecordSale }) => {
+    const [selectedProducts, setSelectedProducts] = useState<Record<string, { product: Product; quantity: number }>>({});
+    const [discount, setDiscount] = useState<string>('0');
+    const [paymentMethod, setPaymentMethod] = useState<'cash' | 'card' | 'credit'>('cash');
+    const [selectedCustomerId, setSelectedCustomerId] = useState<string | undefined>(undefined);
+    const [notes, setNotes] = useState<string>('');
+
+    const handleProductChange = (productId: string, quantityStr: string) => {
+      const quantity = parseInt(quantityStr, 10);
+      const product = products.find(p => p.id === productId);
+      if (!product || quantity < 0) return;
+
+      if (quantity === 0) {
+        setSelectedProducts(prev => {
+          const newProducts = { ...prev };
+          delete newProducts[productId];
+          return newProducts;
+        });
+      } else if (quantity > product.stock + (selectedProducts[product.id]?.quantity || 0)) { // Allow reducing current selected quantity without stock issue
+        alert(`Cannot add more than available stock (${product.stock}) for ${product.name}`);
+        setSelectedProducts(prev => ({ ...prev, [productId]: { product, quantity: product.stock } }));
+      } else {
+        setSelectedProducts(prev => ({ ...prev, [productId]: { product, quantity } }));
+      }
+    };
+
+    const currentSaleItems = useMemo(() => {
+      return Object.values(selectedProducts).map(item => ({
+        productId: item.product.id,
+        productName: item.product.name,
+        quantity: item.quantity,
+        priceAtSale: item.product.price,
+        costAtSale: item.product.costPrice,
+      }));
+    }, [selectedProducts]);
+
+    const subtotal = useMemo(() => 
+      currentSaleItems.reduce((sum, item) => sum + item.quantity * item.priceAtSale, 0)
+    , [currentSaleItems]);
+    
+    const calculatedDiscount = parseFloat(discount) || 0;
+    const finalAmount = Math.max(0, subtotal - calculatedDiscount);
+
+    const handleSubmit = (e: FormEvent) => {
+      e.preventDefault();
+      if (currentSaleItems.length === 0) {
+        alert('Please add products to the sale.');
+        return;
+      }
+      if (paymentMethod === 'credit' && !selectedCustomerId) {
+        alert('Please select a customer for credit sales.');
+        return;
+      }
+
+      onRecordSale(
+        currentSaleItems,
+        calculatedDiscount,
+        paymentMethod,
+        selectedCustomerId,
+        notes
+      );
+      // Reset form
+      setSelectedProducts({});
+      setDiscount('0');
+      setPaymentMethod('cash');
+      setSelectedCustomerId(undefined);
+      setNotes('');
+    };
+
+    return (
+      <div style={{ padding: '20px', border: '1px solid #ccc', borderRadius: '8px', marginBottom: '20px', backgroundColor: '#fff' }}>
+        <h3>New Sale</h3>
+        <form onSubmit={handleSubmit}>
+          <div style={{ marginBottom: '15px' }}>
+            <h4>Products</h4>
+            <select 
+              onChange={(e) => handleProductChange(e.target.value, '1')}
+              value=""
+              style={{ ...inputStyle, width: '100%', marginBottom: '10px' }}
+            >
+              <option value="" disabled>Select a product to add</option>
+              {products.filter(p => p.stock > 0).map(p => (
+                <option key={p.id} value={p.id}>{p.name} (Stock: {p.stock}, Price: {p.price.toFixed(2)})</option>
+              ))}
+            </select>
+            {Object.values(selectedProducts).length > 0 ? (
+              <table style={tableStyle}>
+                <thead>
+                  <tr>
+                    <th style={thStyle}>Product</th>
+                    <th style={thStyle}>Qty</th>
+                    <th style={thStyle}>Price (Rs.)</th>
+                    <th style={thStyle}>Total (Rs.)</th>
+                    <th style={thStyle}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.values(selectedProducts).map(({ product, quantity }) => (
+                    <tr key={product.id}>
+                      <td style={tdStyle}>{product.name}</td>
+                      <td style={tdStyle}>
+                        <input 
+                          type="number" 
+                          value={quantity} 
+                          min="1" 
+                          max={product.stock + (selectedProducts[product.id]?.quantity || 0)} // Max is current stock + what's already selected
+                          onChange={(e) => handleProductChange(product.id, e.target.value)}
+                          style={{ width: '60px', padding: '4px' }}
+                        />
+                      </td>
+                      <td style={tdStyle}>{product.price.toFixed(2)}</td>
+                      <td style={tdStyle}>{(quantity * product.price).toFixed(2)}</td>
+                      <td style={{ ...tdStyle, textAlign: 'center' }}>
+                        <button type="button" onClick={() => handleProductChange(product.id, '0')} style={{ ...smallButtonStyle, background: '#f44336' }}>Remove</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : <p>No products added to sale.</p>}
+          </div>
+
+          <div style={{ marginBottom: '15px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+            <div>Subtotal: <strong>Rs. {subtotal.toFixed(2)}</strong></div>
+            <label>Discount (Rs.): <input type="number" value={discount} onChange={(e) => setDiscount(e.target.value)} min="0" step="0.01" style={inputStyle} /></label>
+            <div style={{ gridColumn: '1 / -1', fontSize: '1.2em', fontWeight: 'bold' }}>Final Amount: Rs. {finalAmount.toFixed(2)}</div>
+          </div>
+
+          <div style={{ marginBottom: '15px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+            <label>Payment Method:
+              <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as 'cash' | 'card' | 'credit')} style={{ ...inputStyle, width: '100%' }}>
+                <option value="cash">Cash</option>
+                <option value="card">Card</option>
+                <option value="credit">Credit (Khata)</option>
+              </select>
+            </label>
+            {paymentMethod === 'credit' && (
+              <label>Select Customer:
+                <select value={selectedCustomerId || ''} onChange={(e) => setSelectedCustomerId(e.target.value || undefined)} style={{ ...inputStyle, width: '100%' }}>
+                  <option value="">-- Select Customer --</option>
+                  {customers.map(c => <option key={c.id} value={c.id}>{c.name} (Credit: {c.creditBalance.toFixed(2)})</option>)}
+                </select>
+              </label>
+            )}
+          </div>
+
+          <label style={{ display: 'block', marginBottom: '15px' }}>Notes:
+            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} style={{ ...inputStyle, width: '100%' }}></textarea>
+          </label>
+
+          <button type="submit" style={{ ...buttonStyle, backgroundColor: '#4CAF50' }}>Record Sale</button>
+        </form>
+      </div>
+    );
+  };
+
+  // Credit Payment Form Component
+  const CreditPaymentForm: React.FC<{ customers: Customer[]; onRecordPayment: typeof recordCustomerPayment; }> = 
+    ({ customers, onRecordPayment }) => {
+    const [selectedCustomerId, setSelectedCustomerId] = useState<string | undefined>(undefined);
+    const [amount, setAmount] = useState<string>('');
+    const [notes, setNotes] = useState<string>('');
+
+    const handleSubmit = (e: FormEvent) => {
+      e.preventDefault();
+      if (!selectedCustomerId) {
+        alert('Please select a customer.');
+        return;
+      }
+      const paymentAmount = parseFloat(amount);
+      if (isNaN(paymentAmount) || paymentAmount <= 0) {
+        alert('Please enter a valid positive amount.');
+        return;
+      }
+      onRecordPayment(selectedCustomerId, paymentAmount, notes);
+      // Reset form
+      setSelectedCustomerId(undefined);
+      setAmount('');
+      setNotes('');
+    };
+
+    return (
+      <div style={{ padding: '20px', border: '1px solid #ccc', borderRadius: '8px', marginTop: '20px', backgroundColor: '#fff' }}>
+        <h3>Record Customer Payment (Khata Settlement)</h3>
+        <form onSubmit={handleSubmit} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+          <label>Customer:
+            <select value={selectedCustomerId || ''} onChange={(e) => setSelectedCustomerId(e.target.value || undefined)} required style={{ ...inputStyle, width: '100%' }}>
+              <option value="">-- Select Customer --</option>
+              {customers.filter(c => c.creditBalance > 0).map(c => <option key={c.id} value={c.id}>{c.name} (Credit: {c.creditBalance.toFixed(2)})</option>)}
+            </select>
+          </label>
+          <label>Amount (Rs.):
+            <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} required min="0.01" step="0.01" style={{ ...inputStyle, width: '100%' }} />
+          </label>
+          <label style={{ gridColumn: '1 / -1' }}>Notes:
+            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} style={{ ...inputStyle, width: '100%' }}></textarea>
+          </label>
+          <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+            <button type="submit" style={{ ...buttonStyle, backgroundColor: '#2196F3' }}>Record Payment</button>
+          </div>
+        </form>
+      </div>
+    );
+  };
+
+  // --- View Components --- //
+  const DashboardView: React.FC = () => (
+    <div>
+      <h2>Dashboard</h2>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px' }}>
+        <div style={cardStyle}>Total Products: <strong>{dashboardData.totalProducts}</strong></div>
+        <div style={cardStyle}>Total Customers: <strong>{dashboardData.totalCustomers}</strong></div>
+        <div style={cardStyle}>Total Sales Value: <strong>Rs. {dashboardData.totalSalesValue.toFixed(2)}</strong></div>
+        <div style={cardStyle}>Credit Outstanding: <strong>Rs. {dashboardData.totalCreditOutstanding.toFixed(2)}</strong></div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginTop: '20px' }}>
+        <div style={cardStyle}>
+          <h3>Low Stock Alerts</h3>
+          {dashboardData.lowStockItems.length > 0 ? (
+            <ul style={{ paddingLeft: '20px' }}>
+              {dashboardData.lowStockItems.map(p => (
+                <li key={p.id}>{p.name} (Stock: {p.stock})</li>
+              ))}
+            </ul>
+          ) : (
+            <p>No low stock items. Great!</p>
+          )}
+        </div>
+        <div style={cardStyle}>
+          <h3>Top 5 Selling Products (by Quantity)</h3>
+          {dashboardData.topProductsList.length > 0 ? (
+            <ol style={{ paddingLeft: '20px' }}>
+              {dashboardData.topProductsList.map((item, index) => (
+                <li key={index}>{item.name}: {item.quantity} units</li>
+              ))}
+            </ol>
+          ) : (
+            <p>No sales data yet.</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  const InventoryView: React.FC = () => (
+    <div>
+      <h2>Inventory Management</h2>
+      <button onClick={() => setEditingProduct({ id: '', name: '', description: '', price: 0, costPrice: 0, stock: 0, category: '', supplier: '' })} style={buttonStyle}>Add Product</button>
+
+      {editingProduct && (
+        <ProductForm
+          product={editingProduct.id ? editingProduct : null} // Pass null for new product
+          onSubmit={(prod) => {
+            if ('id' in prod && prod.id) updateProduct(prod as Product);
+            else addProduct(prod as Omit<Product, 'id'>);
+          }}
+          onCancel={() => setEditingProduct(null)}
+        />
+      )}
+
+      <h3 style={{ marginTop: '20px' }}>Product List</h3>
+      {products.length === 0 ? (
+        <p>No products added yet. Start by adding a new product!</p>
+      ) : (
+        <table style={tableStyle}>
+          <thead>
+            <tr>
+              <th style={thStyle}>Name</th>
+              <th style={thStyle}>Category</th>
+              <th style={thStyle}>Price (Rs.)</th>
+              <th style={thStyle}>Cost (Rs.)</th>
+              <th style={thStyle}>Stock</th>
+              <th style={thStyle}>Supplier</th>
+              <th style={thStyle}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {products.map((product) => (
+              <tr key={product.id} style={{ backgroundColor: product.stock <= 5 ? '#ffe0b2' : 'inherit' }}> {/* Highlight low stock */}
+                <td style={tdStyle}>{product.name}</td>
+                <td style={tdStyle}>{product.category}</td>
+                <td style={tdStyle}>{product.price.toFixed(2)}</td>
+                <td style={tdStyle}>{product.costPrice.toFixed(2)}</td>
+                <td style={tdStyle}>{product.stock}</td>
+                <td style={tdStyle}>{product.supplier}</td>
+                <td style={tdStyle}>
+                  <button onClick={() => setEditingProduct(product)} style={smallButtonStyle}>Edit</button>
+                  <button onClick={() => deleteProduct(product.id)} style={{ ...smallButtonStyle, background: '#f44336' }}>Delete</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+
+  const SalesView: React.FC = () => (
+    <div>
+      <h2>Sales & Transactions</h2>
+      <SaleForm products={products} customers={customers} onRecordSale={recordSale} />
+
+      <h3 style={{ marginTop: '30px' }}>Sales History</h3>
+      {sales.length === 0 ? (
+        <p>No sales recorded yet. Start by creating a new sale!</p>
+      ) : (
+        <table style={tableStyle}>
+          <thead>
+            <tr>
+              <th style={thStyle}>Date</th>
+              <th style={thStyle}>Items</th>
+              <th style={thStyle}>Subtotal (Rs.)</th>
+              <th style={thStyle}>Discount (Rs.)</th>
+              <th style={thStyle}>Final Amount (Rs.)</th>
+              <th style={thStyle}>Method</th>
+              <th style={thStyle}>Customer</th>
+              <th style={thStyle}>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sales.sort((a, b) => b.timestamp - a.timestamp).map((sale) => (
+              <tr key={sale.id}>
+                <td style={tdStyle}>{new Date(sale.timestamp).toLocaleString()}</td>
+                <td style={tdStyle}>
+                  <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                    {sale.items.map((item, index) => (
+                      <li key={index}>{item.productName} ({item.quantity} x {item.priceAtSale.toFixed(2)})</li>
+                    ))}
+                  </ul>
+                </td>
+                <td style={tdStyle}>{sale.subtotal.toFixed(2)}</td>
+                <td style={tdStyle}>{sale.discountAmount.toFixed(2)}</td>
+                <td style={tdStyle}>{sale.finalAmount.toFixed(2)}</td>
+                <td style={tdStyle}>{sale.paymentMethod}</td>
+                <td style={tdStyle}>
+                  {sale.customerId ? customers.find(c => c.id === sale.customerId)?.name : 'N/A'}
+                </td>
+                <td style={tdStyle}>{sale.notes || 'N/A'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+
+  const CustomersView: React.FC = () => (
+    <div>
+      <h2>Customer Management & Khata</h2>
+      <button onClick={() => setEditingCustomer({ id: '', name: '', phone: '', address: '', creditBalance: 0 })} style={buttonStyle}>Add Customer</button>
+
+      {editingCustomer && (
+        <CustomerForm
+          customer={editingCustomer.id ? editingCustomer : null}
+          onSubmit={(cust) => {
+            if ('id' in cust && cust.id) updateCustomer(cust as Customer);
+            else addCustomer(cust as Omit<Customer, 'id' | 'creditBalance'>);
+          }}
+          onCancel={() => setEditingCustomer(null)}
+        />
+      )}
+
+      <h3 style={{ marginTop: '20px' }}>Customer List</h3>
+      {customers.length === 0 ? (
+        <p>No customers added yet. Add a new customer to manage their credit!</p>
+      ) : (
+        <table style={tableStyle}>
+          <thead>
+            <tr>
+              <th style={thStyle}>Name</th>
+              <th style={thStyle}>Phone</th>
+              <th style={thStyle}>Address</th>
+              <th style={thStyle}>Credit Balance (Rs.)</th>
+              <th style={thStyle}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {customers.map((customer) => (
+              <tr key={customer.id}>
+                <td style={tdStyle}>{customer.name}</td>
+                <td style={tdStyle}>{customer.phone}</td>
+                <td style={tdStyle}>{customer.address}</td>
+                <td style={tdStyle}><span style={{ color: customer.creditBalance > 0 ? 'red' : 'green' }}>{customer.creditBalance.toFixed(2)}</span></td>
+                <td style={tdStyle}>
+                  <button onClick={() => setEditingCustomer(customer)} style={smallButtonStyle}>Edit</button>
+                  <button onClick={() => deleteCustomer(customer.id)} style={{ ...smallButtonStyle, background: '#f44336' }}>Delete</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <CreditPaymentForm customers={customers} onRecordPayment={recordCustomerPayment} />
+    </div>
+  );
+
+  const TransactionsView: React.FC = () => (
+    <div>
+      <h2>Khata Transactions History</h2>
+      {transactions.length === 0 ? (
+        <p>No credit transactions recorded yet.</p>
+      ) : (
+        <table style={tableStyle}>
+          <thead>
+            <tr>
+              <th style={thStyle}>Date</th>
+              <th style={thStyle}>Customer</th>
+              <th style={thStyle}>Type</th>
+              <th style={thStyle}>Amount (Rs.)</th>
+              <th style={thStyle}>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {transactions.sort((a, b) => b.timestamp - a.timestamp).map((tx) => (
+              <tr key={tx.id}>
+                <td style={tdStyle}>{new Date(tx.timestamp).toLocaleString()}</td>
+                <td style={tdStyle}>{customers.find(c => c.id === tx.customerId)?.name || 'Unknown'}</td>
+                <td style={tdStyle}>{tx.type.replace(/_/g, ' ')}</td>
+                <td style={tdStyle}><span style={{ color: tx.amount > 0 ? 'red' : 'green' }}>{tx.amount.toFixed(2)}</span></td>
+                <td style={tdStyle}>{tx.notes}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+
+  // --- Basic Styling (Inline for self-containment) --- //
+  const appContainerStyle: React.CSSProperties = {
+    fontFamily: 'Arial, sans-serif',
+    maxWidth: '1200px',
+    margin: '0 auto',
+    padding: '20px',
+    backgroundColor: '#f4f7f6',
+    minHeight: '100vh',
+    boxShadow: '0 0 10px rgba(0,0,0,0.1)',
+  };
+
+  const navStyle: React.CSSProperties = {
+    display: 'flex',
+    gap: '10px',
+    marginBottom: '20px',
+    paddingBottom: '10px',
+    borderBottom: '1px solid #eee',
+    justifyContent: 'center',
+    flexWrap: 'wrap',
+  };
+
+  const navButtonStyle: React.CSSProperties = {
+    padding: '10px 15px',
+    border: 'none',
+    borderRadius: '5px',
+    cursor: 'pointer',
+    backgroundColor: '#007bff',
+    color: 'white',
+    fontSize: '16px',
+    flexShrink: 0,
+  };
+
+  const activeNavButtonStyle: React.CSSProperties = {
+    ...navButtonStyle,
+    backgroundColor: '#0056b3',
+    boxShadow: '0 2px 5px rgba(0,0,0,0.2)',
+  };
+
+  const buttonStyle: React.CSSProperties = {
+    padding: '10px 15px',
+    border: 'none',
+    borderRadius: '5px',
+    cursor: 'pointer',
+    backgroundColor: '#28a745',
+    color: 'white',
+    fontSize: '14px',
+    marginBottom: '15px',
+    marginRight: '10px',
+  };
+
+  const smallButtonStyle: React.CSSProperties = {
+    padding: '5px 10px',
+    marginRight: '5px',
+    border: 'none',
+    borderRadius: '3px',
+    cursor: 'pointer',
+    backgroundColor: '#007bff',
+    color: 'white',
+    fontSize: '12px',
+  };
+
+  const inputStyle: React.CSSProperties = {
+    padding: '8px',
+    border: '1px solid #ddd',
+    borderRadius: '4px',
+    width: 'calc(100% - 16px)',
+    boxSizing: 'border-box',
+    marginTop: '5px',
+    marginBottom: '5px',
+  };
+
+  const tableStyle: React.CSSProperties = {
+    width: '100%',
+    borderCollapse: 'collapse',
+    marginTop: '15px',
+    backgroundColor: '#fff',
+    boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+    borderRadius: '8px',
+    overflow: 'hidden',
+  };
+
+  const thStyle: React.CSSProperties = {
+    border: '1px solid #ddd',
+    padding: '12px 8px',
+    textAlign: 'left',
+    backgroundColor: '#e9ecef',
+    fontWeight: 'bold',
+  };
+
+  const tdStyle: React.CSSProperties = {
+    border: '1px solid #ddd',
+    padding: '8px',
+    textAlign: 'left',
+    verticalAlign: 'top',
+  };
+
+  const cardStyle: React.CSSProperties = {
+    backgroundColor: 'white',
+    padding: '20px',
+    borderRadius: '8px',
+    boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+    textAlign: 'center',
+  };
+
+  return (
+    <div style={appContainerStyle}>
+      <h1 style={{ textAlign: 'center', color: '#333', marginBottom: '20px' }}>Stock Desk</h1>
+      <nav style={navStyle}>
+        <button
+          style={currentView === 'dashboard' ? activeNavButtonStyle : navButtonStyle}
+          onClick={() => setCurrentView('dashboard')}
+        >
+          Dashboard
+        </button>
+        <button
+          style={currentView === 'inventory' ? activeNavButtonStyle : navButtonStyle}
+          onClick={() => setCurrentView('inventory')}
+        >
+          Inventory
+        </button>
+        <button
+          style={currentView === 'sales' ? activeNavButtonStyle : navButtonStyle}
+          onClick={() => setCurrentView('sales')}
+        >
+          Sales
+        </button>
+        <button
+          style={currentView === 'customers' ? activeNavButtonStyle : navButtonStyle}
+          onClick={() => setCurrentView('customers')}
+        >
+          Customers (Khata)
+        </button>
+        <button
+          style={currentView === 'transactions' ? activeNavButtonStyle : navButtonStyle}
+          onClick={() => setCurrentView('transactions')}
+        >
+          Transactions
+        </button>
+      </nav>
+
+      <main>
+        {currentView === 'dashboard' && <DashboardView />}
+        {currentView === 'inventory' && <InventoryView />}
+        {currentView === 'sales' && <SalesView />}
+        {currentView === 'customers' && <CustomersView />}
+        {currentView === 'transactions' && <TransactionsView />}
+      </main>
+    </div>
+  );
+};
+
+export default App;
