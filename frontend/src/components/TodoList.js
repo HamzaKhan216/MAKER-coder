@@ -1,4 +1,5 @@
 import React from 'react';
+import './TodoList.css'; // Import the stylesheet
 import TodoItem from './TodoItem'; // Assuming TodoItem is in the same directory
 
 const TodoList = ({ todos, onToggleComplete, onDelete }) => {
