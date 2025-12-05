@@ -16,6 +16,16 @@ function App() {
     }
   };
 
+  const addTodo = async (text) => {
+    try {
+      const response = await axios.post('/todos', { text });
+      // Assuming the API returns the newly created todo item
+      setTodos([...todos, response.data]);
+    } catch (error) {
+      console.error('Error adding todo:', error);
+    }
+  };
+
   useEffect(() => {
     fetchTodos();
   }, []); // Empty dependency array means this effect runs once after the initial render
@@ -23,9 +33,8 @@ function App() {
   return (
     <div>
       <h1>To-Do List</h1>
-      {/* Placeholder for TodoList and AddTodoForm components */}
-      {/* <AddTodoForm onAddSuccess={fetchTodos} /> */}
-      {/* <TodoList todos={todos} onUpdateSuccess={fetchTodos} onDeleteSuccess={fetchTodos} /> */}
+      <AddTodoForm onAddTodo={addTodo} />
+      <TodoList todos={todos} onUpdateSuccess={fetchTodos} onDeleteSuccess={fetchTodos} />
     </div>
   );
 }
