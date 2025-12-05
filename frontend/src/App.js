@@ -26,6 +26,21 @@ function App() {
     }
   };
 
+  const toggleComplete = async (id, currentCompletedStatus) => {
+    try {
+      const newCompletedStatus = !currentCompletedStatus;
+      const response = await axios.put(`/todos/${id}`, { completed: newCompletedStatus });
+      // Update the state for the specific to-do item
+      setTodos(prevTodos => 
+        prevTodos.map(todo => 
+          todo.id === id ? { ...todo, completed: response.data.completed } : todo
+        )
+      );
+    } catch (error) {
+      console.error(`Error toggling todo ${id} completion:`, error);
+    }
+  };
+
   useEffect(() => {
     fetchTodos();
   }, []); // Empty dependency array means this effect runs once after the initial render
@@ -34,7 +49,12 @@ function App() {
     <div>
       <h1>To-Do List</h1>
       <AddTodoForm onAddTodo={addTodo} />
-      <TodoList todos={todos} onUpdateSuccess={fetchTodos} onDeleteSuccess={fetchTodos} />
+      <TodoList 
+        todos={todos} 
+        onUpdateSuccess={fetchTodos} 
+        onDeleteSuccess={fetchTodos}
+        onToggleComplete={toggleComplete}
+      />
     </div>
   );
 }
