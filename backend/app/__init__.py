@@ -25,4 +25,9 @@ def create_app():
     from .routes import bp as routes_bp
     app.register_blueprint(routes_bp)
 
+    # Register the API blueprint
+    # Assumes 'api/__init__.py' defines a Blueprint object named 'api_bp'
+    from .api import api_bp
+    app.register_blueprint(api_bp, url_prefix='/api')
+
     return app
