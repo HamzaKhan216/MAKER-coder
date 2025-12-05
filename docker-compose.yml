@@ -8,6 +8,12 @@ services:
       - "5000:5000"
     volumes:
       - backend_db_data:/app/instance # Assuming SQLite DB is stored in /app/instance within the container
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
 
 volumes:
   backend_db_data:
