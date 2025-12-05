@@ -41,6 +41,16 @@ function App() {
     }
   };
 
+  const deleteTodo = async (id) => {
+    try {
+      await axios.delete(`/todos/${id}`);
+      // Filter the deleted item out of the local 'todos' state
+      setTodos(prevTodos => prevTodos.filter(todo => todo.id !== id));
+    } catch (error) {
+      console.error(`Error deleting todo ${id}:`, error);
+    }
+  };
+
   useEffect(() => {
     fetchTodos();
   }, []); // Empty dependency array means this effect runs once after the initial render
@@ -52,7 +62,7 @@ function App() {
       <TodoList 
         todos={todos} 
         onUpdateSuccess={fetchTodos} 
-        onDeleteSuccess={fetchTodos}
+        onDeleteTodo={deleteTodo}
         onToggleComplete={toggleComplete}
       />
     </div>
