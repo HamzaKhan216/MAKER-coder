@@ -5,6 +5,8 @@ import AddTodoForm from './components/AddTodoForm';
 import './App.css';
 
 function App() {
+  const [todos, setTodos] = useState([]);
+
   return (
     <div>
       <h1>To-Do List</h1>
