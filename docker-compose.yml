@@ -1,1 +1,13 @@
-// ERROR: AI failed to generate code for this file in batch mode.
+version: '3.8'
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    volumes:
+      - backend_db_data:/app/instance # Assuming SQLite DB is stored in /app/instance within the container
+
+volumes:
+  backend_db_data:
