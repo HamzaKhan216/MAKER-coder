@@ -1,0 +1,28 @@
+.App {
+  max-width: 1200px; /* Set a maximum width for the app content */
+  margin: 0 auto; /* Center the app container horizontally on the page */
+  padding: 20px; /* Add some internal padding */
+  font-family: 'Arial', sans-serif; /* A basic sans-serif font */
+  color: #333; /* Default text color */
+  background-color: #ffffff; /* A clean white background for the app container */
+  min-height: 100vh; /* Ensure the app container takes at least the full viewport height */
+  box-sizing: border-box; /* Include padding in the element's total width and height */
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); /* Subtle shadow for depth */
+  border-radius: 8px; /* Slightly rounded corners */
+
+  /* For centering its direct content horizontally (common for single main sections) */
+  display: flex;
+  flex-direction: column; /* Stack children vertically */
+  align-items: center; /* Centers items horizontally within the flex container */
+  justify-content: flex-start; /* Aligns content to the top within the flex container */
+}
+
+/* Basic styling for the body to ensure full height and a neutral background */
+body {
+  margin: 0;
+  padding: 0;
+  background-color: #f4f7f6; /* A light, neutral background for the page */
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
