@@ -15,8 +15,14 @@ def create_app():
     migrate.init_app(app, db)
     cors.init_app(app, resources={r"/*": {"origins": "*"}})
 
-    # Import blueprints here if you have any
-    # from .main import bp as main_bp
-    # app.register_blueprint(main_bp)
+    # Import models to ensure they are registered with SQLAlchemy
+    # This must happen after db.init_app(app) to prevent circular import issues
+    from . import models
+
+    # Import and register blueprints (routes)
+    # This pattern prevents circular imports by deferring import until app is initialized
+    # Assumes 'routes.py' defines a Blueprint object named 'bp'
+    from .routes import bp as routes_bp
+    app.register_blueprint(routes_bp)
 
     return app
